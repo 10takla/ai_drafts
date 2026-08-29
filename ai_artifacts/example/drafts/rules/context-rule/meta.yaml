@@ -1,0 +1,8 @@
+description: "Provides shared context for the example action"
+conditions:
+  - implicit_invocation
+  - reacts_to_instruction_files
+  - uses_workspace_context
+globs:
+  - "**/*.md"
+  - "**/*.yaml"

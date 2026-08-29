@@ -6,49 +6,90 @@ const { pathToFileURL } = require('url');
 
 function readManifest(sourceDir) {
   const manifestPath = path.join(sourceDir, 'manifest.yaml');
-  const defaults = { name: 'impl-instrs', version: '1.0.0', description: '', managers: {} };
-  if (!fs.existsSync(manifestPath)) return defaults;
+  const defaults = { description: '' };
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Манифест не найден: "${manifestPath}".`);
+  }
 
   const text = fs.readFileSync(manifestPath, 'utf8');
-  const result = { ...defaults };
+  const result = { ...defaults, custom_conditions: {} };
+  let inCustomConditions = false;
   for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^(name|version|description):\s*(.*?)\s*$/);
-    if (m) result[m[1]] = m[2].replace(/^["']|["']$/g, '').trim();
+    const topLevel = line.match(/^(name|version|description):\s*(.*?)\s*$/);
+    if (topLevel) {
+      result[topLevel[1]] = parseString(topLevel[2]);
+      inCustomConditions = false;
+      continue;
+    }
+
+    if (/^custom_conditions:\s*$/.test(line)) {
+      inCustomConditions = true;
+      continue;
+    }
+
+    if (inCustomConditions) {
+      const customCondition = line.match(/^\s+([a-zA-Z0-9_]+):\s*(.*?)\s*$/);
+      if (customCondition) {
+        result.custom_conditions[customCondition[1]] = parseString(customCondition[2]);
+        continue;
+      }
+      if (line.trim() && !line.trim().startsWith('#')) inCustomConditions = false;
+    }
+  }
+  if (!result.name) {
+    throw new Error(`В манифесте "${manifestPath}" отсутствует поле name.`);
+  }
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(result.name)) {
+    throw new Error('Поле manifest.name должно содержать только строчные латинские буквы, цифры и одиночные дефисы.');
+  }
+  if (!result.version) {
+    throw new Error(`В манифесте "${manifestPath}" отсутствует поле version.`);
+  }
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(result.version)) {
+    throw new Error('Поле manifest.version должно иметь формат MAJOR.MINOR.PATCH.');
   }
   return result;
 }
 
-const DESCRIPTION_REACTS_TO_INSTRUCTIONS =
-  "КРИТИЧЕСКАЯ БЛОКИРОВКА: ВЫ ОБЯЗАНЫ прочитать это перед ЛЮБЫМ взаимодействием (даже при простом исправлении опечаток) с файлами и папками по паттернам: 'ai_instrs/', '*.ai_instrs/', 'ai_instrs.*/', 'ai_instrs.*', '*.ai_instrs.*'. Файл содержит нестандартные правила, которые отменяют ваши базовые знания по умолчанию. Вы провалите задачу, если проигнорируете это.";
+function parseString(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      throw new Error(`Некорректная строка YAML: ${trimmed}`);
+    }
+  }
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replace(/''/g, "'");
+  }
+  return trimmed;
+}
 
-const EXPLICIT_DRAFT_REFERENCE_FORMATTERS = {
-  antigravity: (name) => `[impl-instrs:${name}](slashCommand;impl-instrs:${name})`,
-  codex: (name) => `$impl-instrs:${name}`,
-  'claude-code': (name) => `/impl-instrs:${name}`,
-  opencode: (name) => `/impl-instrs-${name}`
-};
+function formatDraftReference(manager, name, isImplicit, packName) {
+  if (manager === 'antigravity' && isImplicit) {
+    const pluginDir = process.env.ANTIGRAVITY_PLUGIN_DIR || path.join(
+      os.homedir(),
+      '.gemini',
+      'config',
+      'plugins',
+      packName
+    );
+    const fileName = `${packName}-${name}.md`;
+    const ruleUri = pathToFileURL(path.join(pluginDir, 'rules', fileName)).href;
+    return `[${fileName}](*rule;${ruleUri}*)`;
+  }
 
-const ANTIGRAVITY_PLUGIN_DIR = process.env.ANTIGRAVITY_PLUGIN_DIR || path.join(
-  os.homedir(),
-  '.gemini',
-  'config',
-  'plugins',
-  'impl_instrs'
-);
+  const formatters = {
+    antigravity: () => `[${packName}:${name}](slashCommand;${packName}:${name})`,
+    codex: () => `$${packName}:${name}`,
+    'claude-code': () => `/${packName}:${name}`,
+    opencode: () => `/${packName}-${name}`
+  };
+  return formatters[manager]();
+}
 
-const IMPLICIT_DRAFT_REFERENCE_FORMATTERS = {
-  antigravity: (name) => {
-    const ruleUri = pathToFileURL(
-      path.join(ANTIGRAVITY_PLUGIN_DIR, 'rules', `impl-instrs-${name}.md`)
-    ).href;
-    return `[impl-instrs-${name}.md](*rule;${ruleUri}*)`;
-  },
-  codex: (name) => `$impl-instrs:${name}`,
-  'claude-code': (name) => `/impl-instrs:${name}`,
-  opencode: (name) => `/impl-instrs-${name}`
-};
-
-function compileContent(content, manager, draftsByName) {
+function compileContent(content, manager, draftsByName, packName) {
   return content.replace(/@draft\(([a-z0-9]+(?:-[a-z0-9]+)*)\)/g, (_, name) => {
     const draft = draftsByName.get(name);
     if (!draft) {
@@ -56,27 +97,22 @@ function compileContent(content, manager, draftsByName) {
     }
 
     const isExplicit = draft.meta.conditions.includes('explicit_invocation');
-    const isImplicit = draft.meta.conditions.includes('implicit_invocation') ||
-      Boolean(draft.meta.trigger || draft.meta.globs);
+    const isImplicit = draft.meta.conditions.includes('implicit_invocation');
     if (isExplicit && isImplicit) {
       throw new Error(`Черновик "${name}" одновременно явный и неявный.`);
     }
 
-    const formatters = isImplicit
-      ? IMPLICIT_DRAFT_REFERENCE_FORMATTERS
-      : EXPLICIT_DRAFT_REFERENCE_FORMATTERS;
-    return formatters[manager](name);
+    return formatDraftReference(manager, name, isImplicit, packName);
   });
 }
 
 function parseMeta(content) {
   const conditions = [];
   let description = undefined;
-  let trigger = undefined;
   let globs = undefined;
 
   const lines = content.split(/\r?\n/);
-  let inConditions = false;
+  let listField = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -84,60 +120,106 @@ function parseMeta(content) {
 
     const descMatch = trimmed.match(/^description:\s*(.*)$/);
     if (descMatch) {
-      inConditions = false;
-      let val = descMatch[1].trim();
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      description = val;
-      continue;
-    }
-
-    const trigMatch = trimmed.match(/^trigger:\s*(.*)$/);
-    if (trigMatch) {
-      inConditions = false;
-      let val = trigMatch[1].trim().replace(/^['"]|['"]$/g, '');
-      trigger = val;
+      listField = null;
+      description = parseString(descMatch[1]);
       continue;
     }
 
     const globsMatch = trimmed.match(/^globs:\s*(.*)$/);
     if (globsMatch) {
-      inConditions = false;
-      let val = globsMatch[1].trim().replace(/^['"]|['"]$/g, '');
-      globs = val;
+      const value = globsMatch[1].trim();
+      if (!value) {
+        globs = [];
+        listField = 'globs';
+      } else if (value.startsWith('[') && value.endsWith(']')) {
+        globs = value.slice(1, -1)
+          .split(',')
+          .map((item) => parseString(item))
+          .filter(Boolean);
+        listField = null;
+      } else if (/^(?:\{|\d|true$|false$|null$)/i.test(value)) {
+        globs = { invalid: value };
+        listField = null;
+      } else {
+        globs = parseString(value);
+        listField = null;
+      }
       continue;
     }
 
     if (trimmed.startsWith('conditions:')) {
-      inConditions = true;
+      listField = 'conditions';
       const inlineMatch = trimmed.match(/conditions:\s*\[(.*?)\]/);
       if (inlineMatch) {
         inlineMatch[1]
           .split(',')
-          .map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
+          .map((s) => parseString(s))
           .filter(Boolean)
           .forEach((c) => conditions.push(c));
-        inConditions = false;
+        listField = null;
       }
       continue;
     }
 
-    if (inConditions) {
-      if (trimmed.startsWith('-')) {
-        const cond = trimmed
-          .replace(/^-\s*/, '')
-          .split('#')[0]
-          .trim()
-          .replace(/^['"]|['"]$/g, '');
-        if (cond) conditions.push(cond);
-      } else if (/^[a-zA-Z0-9_]+:/.test(trimmed)) {
-        inConditions = false;
-      }
+    if (listField && trimmed.startsWith('-')) {
+      const value = parseString(trimmed.replace(/^-\s*/, '').split('#')[0]);
+      if (value && listField === 'conditions') conditions.push(value);
+      if (value && listField === 'globs') globs.push(value);
+    } else if (/^[a-zA-Z0-9_]+:/.test(trimmed)) {
+      listField = null;
     }
   }
 
-  return { conditions, description, trigger, globs };
+  return { conditions, description, globs };
+}
+
+function validateDraft(draft, manifest) {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(draft.name)) {
+    throw new Error(
+      `Имя черновика "${draft.name}" должно содержать только строчные латинские буквы, цифры и одиночные дефисы.`
+    );
+  }
+
+  const invocationModes = draft.meta.conditions.filter((condition) =>
+    condition === 'explicit_invocation' || condition === 'implicit_invocation'
+  );
+  if (invocationModes.length === 0) {
+    throw new Error(`В черновике "${draft.name}" отсутствует режим вызова.`);
+  }
+  if (invocationModes.length !== 1) {
+    throw new Error(`Черновик "${draft.name}" одновременно явный и неявный.`);
+  }
+
+  for (const condition of draft.meta.conditions) {
+    if (condition === 'explicit_invocation' || condition === 'implicit_invocation') continue;
+    if (!Object.prototype.hasOwnProperty.call(manifest.custom_conditions, condition)) {
+      throw new Error(`Условие "${condition}" из черновика "${draft.name}" не определено в manifest.custom_conditions.`);
+    }
+  }
+
+  const { globs } = draft.meta;
+  if (globs !== undefined && typeof globs !== 'string' &&
+      !(Array.isArray(globs) && globs.every((glob) => typeof glob === 'string'))) {
+    throw new Error(`Поле globs черновика "${draft.name}" должно иметь тип string или string[].`);
+  }
+}
+
+function formatGlobs(globs) {
+  return Array.isArray(globs) ? globs.join(', ') : globs;
+}
+
+function buildDescription(draft, manifest, includeGlobsFallback) {
+  const parts = [];
+  if (draft.meta.description) parts.push(draft.meta.description);
+  for (const condition of draft.meta.conditions) {
+    if (Object.prototype.hasOwnProperty.call(manifest.custom_conditions, condition)) {
+      parts.push(manifest.custom_conditions[condition]);
+    }
+  }
+  if (includeGlobsFallback && draft.meta.globs !== undefined) {
+    parts.push(`globs: ${formatGlobs(draft.meta.globs)}.`);
+  }
+  return parts.filter(Boolean).join(' ');
 }
 
 function ensureDir(dirPath) {
@@ -151,8 +233,27 @@ function writeFile(filePath, content) {
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
+function cleanManagerOutputs(outputDir) {
+  for (const manager of ['antigravity', 'codex', 'claude-code', 'opencode']) {
+    const managerDir = path.join(outputDir, manager);
+    if (!fs.existsSync(managerDir)) continue;
+    if (!fs.lstatSync(managerDir).isDirectory()) {
+      throw new Error(`Ожидалась директория результата менеджера: "${managerDir}".`);
+    }
+    fs.rmSync(managerDir, { recursive: true, force: true });
+  }
+}
+
+function validateDraftsDir(dir) {
+  if (!fs.existsSync(dir)) {
+    throw new Error(`Директория черновиков не найдена: "${dir}".`);
+  }
+  if (!fs.lstatSync(dir).isDirectory()) {
+    throw new Error(`Ожидалась директория черновиков: "${dir}".`);
+  }
+}
+
 function getDrafts(dir) {
-  if (!fs.existsSync(dir)) return [];
   const drafts = [];
 
   function scan(currentDir) {
@@ -179,17 +280,11 @@ function getDrafts(dir) {
 }
 
 function compile(sourceDir, outputDir) {
-  const drafts = getDrafts(sourceDir);
-  if (drafts.length === 0) {
-    console.log(`[!] В директории "${sourceDir}" не найдено модульных черновиков ({name}/meta.yaml + content.md).`);
-    return;
-  }
-
-  console.log(`[+] Найдено черновиков: ${drafts.length} в "${sourceDir}"`);
-
+  validateDraftsDir(sourceDir);
   const manifest = readManifest(sourceDir);
+  const drafts = getDrafts(sourceDir);
   console.log(`[+] Манифест: ${manifest.name}@${manifest.version}`);
-
+  console.log(`[+] Найдено черновиков: ${drafts.length} в "${sourceDir}"`);
 
   const draftsByName = new Map();
   for (const draft of drafts) {
@@ -199,43 +294,51 @@ function compile(sourceDir, outputDir) {
     draftsByName.set(draft.name, draft);
   }
 
-  let hasExplicit = false;
+  for (const draft of drafts) {
+    validateDraft(draft, manifest);
+    for (const manager of ['antigravity', 'codex', 'claude-code', 'opencode']) {
+      compileContent(draft.content, manager, draftsByName, manifest.name);
+    }
+  }
+
+  cleanManagerOutputs(outputDir);
+
+  if (drafts.length === 0) {
+    console.log(`[✓] Модульных черновиков нет; результаты для 4 менеджеров очищены в "${outputDir}".`);
+    return;
+  }
 
   for (const draft of drafts) {
     const { name, meta, content } = draft;
+    validateDraft(draft, manifest);
     const isExplicit = meta.conditions.includes('explicit_invocation');
     const isImplicit = meta.conditions.includes('implicit_invocation');
-    const reacts = meta.conditions.includes('reacts_to_instruction_files');
-    const hasCustomTrigger = Boolean(meta.trigger || meta.globs);
-    const antigravityContent = compileContent(content, 'antigravity', draftsByName);
-    const codexContent = compileContent(content, 'codex', draftsByName);
-    const claudeCodeContent = compileContent(content, 'claude-code', draftsByName);
-    const openCodeContent = compileContent(content, 'opencode', draftsByName);
+    const antigravityContent = compileContent(content, 'antigravity', draftsByName, manifest.name);
+    const codexContent = compileContent(content, 'codex', draftsByName, manifest.name);
+    const claudeCodeContent = compileContent(content, 'claude-code', draftsByName, manifest.name);
+    const openCodeContent = compileContent(content, 'opencode', draftsByName, manifest.name);
 
-    if (isExplicit) hasExplicit = true;
-
-    const description = meta.description !== undefined
-      ? meta.description
-      : (reacts ? DESCRIPTION_REACTS_TO_INSTRUCTIONS : '');
+    const antigravityDescription = buildDescription(draft, manifest, !isImplicit);
+    const fallbackDescription = buildDescription(draft, manifest, true);
 
     // 1. Antigravity
-    if (isImplicit || hasCustomTrigger) {
-      const lines = ['---'];
-      if (!hasCustomTrigger) {
-        lines.push(`name: "impl-instrs-${name}"`);
-      }
-      lines.push(`description: ${JSON.stringify(description)}`);
-      lines.push(`trigger: ${JSON.stringify(meta.trigger || 'model_decision')}`);
-      if (meta.globs) {
+    if (isImplicit) {
+      const lines = [
+        '---',
+        `name: "${manifest.name}-${name}"`,
+        `description: ${JSON.stringify(antigravityDescription)}`,
+        'trigger: "model_decision"'
+      ];
+      if (meta.globs !== undefined) {
         lines.push(`globs: ${JSON.stringify(meta.globs)}`);
       }
       lines.push('---', '', antigravityContent);
-      writeFile(path.join(outputDir, 'antigravity', 'rules', `impl-instrs-${name}.md`), lines.join('\n'));
+      writeFile(path.join(outputDir, 'antigravity', 'rules', `${manifest.name}-${name}.md`), lines.join('\n'));
     } else {
       const frontmatter = [
         '---',
-        `name: "impl-instrs:${name}"`,
-        `description: ${JSON.stringify(description)}`,
+        `name: "${manifest.name}:${name}"`,
+        `description: ${JSON.stringify(antigravityDescription)}`,
         '---',
         '',
         antigravityContent
@@ -248,12 +351,18 @@ function compile(sourceDir, outputDir) {
       const frontmatter = [
         '---',
         `name: "${name}"`,
-        `description: ${JSON.stringify(description)}`,
+        `description: ${JSON.stringify(fallbackDescription)}`,
         '---',
         '',
         codexContent
       ].join('\n');
       writeFile(path.join(outputDir, 'codex', 'skills', name, 'SKILL.md'), frontmatter);
+      if (isExplicit) {
+        writeFile(
+          path.join(outputDir, 'codex', 'skills', name, 'agents', 'openai.yaml'),
+          'policy:\n  allow_implicit_invocation: false\n'
+        );
+      }
     }
 
     // 3. Claude Code
@@ -261,12 +370,12 @@ function compile(sourceDir, outputDir) {
       const lines = [
         '---',
         `name: "${name}"`,
-        `description: ${JSON.stringify(description)}`
+        `description: ${JSON.stringify(fallbackDescription)}`
       ];
       if (isExplicit) {
         lines.push('disable-model-invocation: true');
       }
-      if (isImplicit && !hasCustomTrigger) {
+      if (isImplicit) {
         lines.push('user-invocable: false');
       }
       lines.push('---', '', claudeCodeContent);
@@ -274,26 +383,26 @@ function compile(sourceDir, outputDir) {
     }
 
     // 4. OpenCode
-    if (isImplicit || hasCustomTrigger) {
+    if (isImplicit) {
       const frontmatter = [
         '---',
-        `name: "impl-instrs-${name}"`,
-        `description: ${JSON.stringify(description)}`,
+        `name: "${manifest.name}-${name}"`,
+        `description: ${JSON.stringify(fallbackDescription)}`,
         '---',
         '',
         openCodeContent
       ].join('\n');
-      writeFile(path.join(outputDir, 'opencode', 'skills', `impl-instrs-${name}`, 'SKILL.md'), frontmatter);
+      writeFile(path.join(outputDir, 'opencode', 'skills', `${manifest.name}-${name}`, 'SKILL.md'), frontmatter);
     } else {
       const frontmatter = [
         '---',
-        `name: "impl-instrs-${name}"`,
-        `description: ${JSON.stringify(description)}`,
+        `name: "${manifest.name}-${name}"`,
+        `description: ${JSON.stringify(fallbackDescription)}`,
         '---',
         '',
         openCodeContent
       ].join('\n');
-      writeFile(path.join(outputDir, 'opencode', 'commands', `impl-instrs-${name}.md`), frontmatter);
+      writeFile(path.join(outputDir, 'opencode', 'commands', `${manifest.name}-${name}.md`), frontmatter);
     }
   }
 
@@ -307,13 +416,6 @@ function compile(sourceDir, outputDir) {
     path.join(outputDir, 'codex', '.codex-plugin', 'plugin.json'),
     JSON.stringify({ name: manifest.name, version: manifest.version, description: manifest.description }, null, 2) + '\n'
   );
-
-  if (hasExplicit) {
-    writeFile(
-      path.join(outputDir, 'codex', 'agents', 'openai.yaml'),
-      'policy:\n  allow_implicit_invocation: false\n'
-    );
-  }
 
   const claudeManifest = { name: manifest.name, version: manifest.version, description: manifest.description, type: 'skills-directory' };
   writeFile(
@@ -376,4 +478,3 @@ function main() {
 if (require.main === module) {
   main();
 }
-

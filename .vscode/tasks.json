@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Интеграция примера черновиков",
+      "type": "process",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/ai_artifacts/integrate.js",
+        "${workspaceFolder}/ai_artifacts/example/drafts",
+        "${workspaceFolder}/ai_artifacts/example/integrated",
+        "--watch"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

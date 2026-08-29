@@ -1,0 +1,6 @@
+name: example-pack
+version: 1.0.0
+description: "Example draft pack"
+custom_conditions:
+  reacts_to_instruction_files: "Reacts to instruction files."
+  uses_workspace_context: "Uses the current workspace context."

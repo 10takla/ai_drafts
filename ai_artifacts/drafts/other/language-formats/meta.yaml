@@ -1,3 +1,0 @@
-description: "Правило форматирования путей в Markdown-файлах для сохранения пробелов"
-trigger: glob
-globs: "**/*.md"
