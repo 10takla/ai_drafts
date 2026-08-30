@@ -212,6 +212,40 @@ function buildDescription(draft, manifest, includeGlobsFallback) {
   return parts.filter(Boolean).join(' ');
 }
 
+function copyDirectoryRecursive(src, dest) {
+  ensureDir(dest);
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(srcPath, destPath);
+    } else {
+      ensureDir(path.dirname(destPath));
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function copyAuxiliaryFiles(srcDir, destDir) {
+  if (!fs.existsSync(srcDir)) return;
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'meta.yaml' || entry.name === 'content.md') continue;
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(srcPath, destPath);
+    } else {
+      ensureDir(path.dirname(destPath));
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+
+
+
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
@@ -222,6 +256,7 @@ function writeFile(filePath, content) {
   ensureDir(path.dirname(filePath));
   fs.writeFileSync(filePath, content, 'utf8');
 }
+
 
 function cleanManagerOutputs(outputDir) {
   for (const manager of ['antigravity', 'codex', 'claude-code', 'opencode']) {
@@ -337,6 +372,7 @@ function compile(sourceDir, outputDir) {
         antigravityContent
       ].join('\n');
       writeFile(path.join(outputDir, 'antigravity', 'skills', name, 'SKILL.md'), frontmatter);
+      copyAuxiliaryFiles(draft.path, path.join(outputDir, 'antigravity', 'skills', name));
     }
 
     // 2. Codex
@@ -350,6 +386,7 @@ function compile(sourceDir, outputDir) {
         codexContent
       ].join('\n');
       writeFile(path.join(outputDir, 'codex', 'skills', name, 'SKILL.md'), frontmatter);
+      copyAuxiliaryFiles(draft.path, path.join(outputDir, 'codex', 'skills', name));
       if (isExplicit) {
         writeFile(
           path.join(outputDir, 'codex', 'skills', name, 'agents', 'openai.yaml'),
@@ -373,6 +410,7 @@ function compile(sourceDir, outputDir) {
       }
       lines.push('---', '', claudeCodeContent);
       writeFile(path.join(outputDir, 'claude-code', 'skills', name, 'SKILL.md'), lines.join('\n'));
+      copyAuxiliaryFiles(draft.path, path.join(outputDir, 'claude-code', 'skills', name));
     }
 
     // 4. OpenCode
@@ -386,6 +424,7 @@ function compile(sourceDir, outputDir) {
         openCodeContent
       ].join('\n');
       writeFile(path.join(outputDir, 'opencode', 'skills', `${manifest.name}-${name}`, 'SKILL.md'), frontmatter);
+      copyAuxiliaryFiles(draft.path, path.join(outputDir, 'opencode', 'skills', `${manifest.name}-${name}`));
     } else {
       const frontmatter = [
         '---',
@@ -396,7 +435,9 @@ function compile(sourceDir, outputDir) {
         openCodeContent
       ].join('\n');
       writeFile(path.join(outputDir, 'opencode', 'commands', `${manifest.name}-${name}.md`), frontmatter);
+      copyAuxiliaryFiles(draft.path, path.join(outputDir, 'opencode', 'skills', `${manifest.name}-${name}`));
     }
+
   }
 
   // Манифесты
@@ -461,12 +502,19 @@ function main() {
   const sourceDir = resolvePath(positionalArgs[0], positionalArgs[0]);
   const outputDir = resolvePath(positionalArgs[1], positionalArgs[1]);
 
-  if (isWatch) {
-    watchDrafts(sourceDir, outputDir);
-  } else {
-    compile(sourceDir, outputDir);
+  try {
+    if (isWatch) {
+      watchDrafts(sourceDir, outputDir);
+    } else {
+      compile(sourceDir, outputDir);
+    }
+  } catch (err) {
+    console.error(`[!] Ошибка: ${err.message}`);
+    console.error(err.stack);
+    process.exit(1);
   }
 }
+
 
 if (require.main === module) {
   main();
