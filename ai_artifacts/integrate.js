@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { pathToFileURL } = require('url');
 
 function readManifest(sourceDir) {
   const manifestPath = path.join(sourceDir, 'manifest.yaml');
@@ -66,18 +64,9 @@ function parseString(value) {
   return trimmed;
 }
 
-function formatDraftReference(manager, name, isImplicit, packName) {
-  if (manager === 'antigravity' && isImplicit) {
-    const pluginDir = process.env.ANTIGRAVITY_PLUGIN_DIR || path.join(
-      os.homedir(),
-      '.gemini',
-      'config',
-      'plugins',
-      packName
-    );
-    const fileName = `${packName}-${name}.md`;
-    const ruleUri = pathToFileURL(path.join(pluginDir, 'rules', fileName)).href;
-    return `[${fileName}](*rule;${ruleUri}*)`;
+function formatDraftReference(manager, name, isAntigravityRule, packName) {
+  if (manager === 'antigravity' && isAntigravityRule) {
+    return `[${packName}:${name}](rule;${packName}:${name})`;
   }
 
   const formatters = {
@@ -102,7 +91,8 @@ function compileContent(content, manager, draftsByName, packName) {
       throw new Error(`Черновик "${name}" одновременно явный и неявный.`);
     }
 
-    return formatDraftReference(manager, name, isImplicit, packName);
+    const isAntigravityRule = isImplicit || draft.meta.globs !== undefined;
+    return formatDraftReference(manager, name, isAntigravityRule, packName);
   });
 }
 
@@ -313,6 +303,7 @@ function compile(sourceDir, outputDir) {
     validateDraft(draft, manifest);
     const isExplicit = meta.conditions.includes('explicit_invocation');
     const isImplicit = meta.conditions.includes('implicit_invocation');
+    const hasGlobs = meta.globs !== undefined;
     const antigravityContent = compileContent(content, 'antigravity', draftsByName, manifest.name);
     const codexContent = compileContent(content, 'codex', draftsByName, manifest.name);
     const claudeCodeContent = compileContent(content, 'claude-code', draftsByName, manifest.name);
@@ -322,15 +313,17 @@ function compile(sourceDir, outputDir) {
     const fallbackDescription = buildDescription(draft, manifest, true);
 
     // 1. Antigravity
-    if (isImplicit) {
+    if (hasGlobs || isImplicit) {
       const lines = [
         '---',
-        `name: "${manifest.name}-${name}"`,
-        `description: ${JSON.stringify(antigravityDescription)}`,
-        'trigger: "model_decision"'
+        `name: "${manifest.name}-${name}"`
       ];
-      if (meta.globs !== undefined) {
+      if (hasGlobs) {
+        lines.push('trigger: "glob"');
         lines.push(`globs: ${JSON.stringify(meta.globs)}`);
+      } else {
+        lines.push(`description: ${JSON.stringify(antigravityDescription)}`);
+        lines.push('trigger: "model_decision"');
       }
       lines.push('---', '', antigravityContent);
       writeFile(path.join(outputDir, 'antigravity', 'rules', `${manifest.name}-${name}.md`), lines.join('\n'));
