@@ -344,7 +344,7 @@ function compile(sourceDir, outputDir) {
     const claudeCodeContent = compileContent(content, 'claude-code', draftsByName, manifest.name);
     const openCodeContent = compileContent(content, 'opencode', draftsByName, manifest.name);
 
-    const antigravityDescription = buildDescription(draft, manifest, !isImplicit);
+    const antigravityRuleDescription = buildDescription(draft, manifest, false);
     const fallbackDescription = buildDescription(draft, manifest, true);
 
     // 1. Antigravity
@@ -357,7 +357,7 @@ function compile(sourceDir, outputDir) {
         lines.push('trigger: "glob"');
         lines.push(`globs: ${JSON.stringify(meta.globs)}`);
       } else {
-        lines.push(`description: ${JSON.stringify(antigravityDescription)}`);
+        lines.push(`description: ${JSON.stringify(antigravityRuleDescription)}`);
         lines.push('trigger: "model_decision"');
       }
       lines.push('---', '', antigravityContent);
@@ -366,7 +366,7 @@ function compile(sourceDir, outputDir) {
       const frontmatter = [
         '---',
         `name: "${manifest.name}:${name}"`,
-        `description: ${JSON.stringify(antigravityDescription)}`,
+        'description: ""',
         '---',
         '',
         antigravityContent
